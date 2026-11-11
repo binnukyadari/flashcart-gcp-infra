@@ -1,42 +1,15 @@
-name: drift
+# Drift scanning is paused during dev-only PR qualification.
+# No schedule, cloud authentication, or reusable Terraform invocation.
+name: drift (paused)
 
 on:
-  schedule:
-    - cron: "30 1 * * *" # 07:00 IST daily
   workflow_dispatch: {}
 
 permissions:
-  id-token: write
   contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
-  list:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.m.outputs.matrix }}
+  paused:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - id: m
-        run: |
-          m=$(find stacks -path '*/env/*.tfvars' 2>/dev/null | sort | while read -r f; do
-            stack=$(dirname "$(dirname "$f")")
-            env=$(basename "$f" .tfvars)
-            jq -cn --arg s "$stack" --arg e "$env" '{stack:$s, environment:$e}'
-          done | jq -cs .)
-          echo "matrix=$m" >> "$GITHUB_OUTPUT"
-
-  drift:
-    needs: list
-    if: needs.list.outputs.matrix != '[]'
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        include: ${{ fromJson(needs.list.outputs.matrix) }}
-    uses: ./.github/workflows/terraform-stack.yml
-    with:
-      stack: ${{ matrix.stack }}
-      environment: ${{ matrix.environment }}
-      drift_check: true
+      - run: echo 'Drift scanning is paused. Only dev Artifact Registry PR planning is enabled.'

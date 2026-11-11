@@ -17,3 +17,8 @@ scripts/backend.env
 .idea/
 .vscode/
 
+
+# Ephemeral OIDC credentials and local saved plans
+gha-creds-*.json
+tfplan
+!stacks/03-application/.terraform.lock.hcl
