@@ -1,11 +1,18 @@
 # Dev HTTPS edge
 
-Provisioning started after reviewing a saved plan of 16 creates, 0 updates and
-0 deletes. Existing backend/data resources are preserved. Temporary DNS resolves
-to `136.82.74.122`; IAP is enabled and Cloud Armor is attached to the backend.
-Managed TLS is still provisioning; this is not yet a verified usable HTTPS URL.
+All 16 edge resources are created in the private remote state. Temporary DNS
+resolves to `136.82.74.122`; HTTP returns 301 to HTTPS. IAP is enabled, the IAP
+service identity has Cloud Run invoker access, trainer-only IAP access is set,
+and Cloud Armor is attached. Managed TLS is still provisioning; do not treat
+this as a verified usable HTTPS URL until the certificate becomes ACTIVE.
 
 Training URL: `https://flashcart-136-82-74-122.sslip.io`.
+
+Local validation and all 18 existing deployment safety tests passed. Provider
+checksums cover Linux CI and macOS. Initial creation saved 15 resources before
+IAP identity propagation delayed its invoker binding. After explicitly creating
+the IAP service identity, a new saved plan contained only the one missing binding;
+it applied successfully without changing or deleting the saved resources.
 
 - Project: `ritru-fc-dev-01`; serverless NEG region: `asia-south1`.
 - State prefix: `gcp-02-flashcart/stacks/05-edge/dev`.
