@@ -134,6 +134,7 @@ jobs:
               assert after['location'] == 'asia-south1', 'Unexpected region'
               assert after['repository_id'] == 'flashcart-docker', 'Unexpected repository'
               assert after['format'] == 'DOCKER', 'Unexpected repository format'
+              assert after['docker_config'][0]['immutable_tags'] is True, 'Immutable tags required'
           counts = Counter(','.join(r['change']['actions']) for r in changes)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('### FlashCart Artifact Registry dev plan\n\n')
