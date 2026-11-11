@@ -1,7 +1,14 @@
 name: terraform-stack
 
 on:
-  workflow_call: {}
+  workflow_call:
+    outputs:
+      plan_digest:
+        value: ${{ jobs.plan.outputs.plan_digest }}
+      creates:
+        value: ${{ jobs.plan.outputs.creates }}
+      planned_at:
+        value: ${{ jobs.plan.outputs.planned_at }}
 
 permissions:
   contents: read
@@ -16,11 +23,17 @@ jobs:
   plan:
     name: plan Artifact Registry (dev only)
     if: >-
-      github.event_name == 'pull_request' &&
       github.repository == 'binnukyadari/flashcart-gcp-infra' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.base_ref == 'main' &&
-      github.head_ref == 'feat/flashcart-artifact-registry'
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.base_ref == 'main' &&
+        github.head_ref == 'feat/flashcart-artifact-registry') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+        github.workflow_ref == 'binnukyadari/flashcart-gcp-infra/.github/workflows/deploy-dev.yml@refs/heads/main'))
+    outputs:
+      plan_digest: ${{ steps.review.outputs.plan_digest }}
+      creates: ${{ steps.review.outputs.creates }}
+      planned_at: ${{ steps.review.outputs.planned_at }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -39,13 +52,16 @@ jobs:
 
       - name: Check dev planning configuration
         env:
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          WIF_PROVIDER: ${{ github.event_name == 'pull_request' && vars.GCP_WIF_PROVIDER || vars.GCP_MANUAL_PLAN_WIF_PROVIDER }}
           PLAN_SA: ${{ vars.GCP_PLAN_SA }}
           STATE_BUCKET: ${{ vars.GCP_STATE_BUCKET }}
           STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
         run: |
           set -euo pipefail
-          test "$WIF_PROVIDER" = 'projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-pr'
+          case "$WIF_PROVIDER" in
+            projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-pr|projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-manual-plan) ;;
+            *) exit 1 ;;
+          esac
           test "$PLAN_SA" = 'flashcart-dev-pr-plan@ritru-tf-seed-01.iam.gserviceaccount.com'
           test "$STATE_BUCKET" = 'ritru-tfstate-586582398977'
           test "$STATE_PREFIX" = 'gcp-02-flashcart'
@@ -61,7 +77,7 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ github.event_name == 'pull_request' && vars.GCP_WIF_PROVIDER || vars.GCP_MANUAL_PLAN_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_PLAN_SA }}
           project_id: ritru-fc-dev-01
           token_format: access_token
@@ -79,28 +95,7 @@ jobs:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           STATE_BUCKET: ${{ vars.GCP_STATE_BUCKET }}
           STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
-        run: |
-          python3 - <<'PYCODE'
-          import json, os, pathlib, urllib.error, urllib.parse, urllib.request
-          state = pathlib.Path(os.environ['RUNNER_TEMP']) / 'flashcart-dev.tfstate'
-          obj = f"{os.environ['STATE_PREFIX']}/{os.environ['STACK']}/dev/default.tfstate"
-          url = f"https://storage.googleapis.com/storage/v1/b/{os.environ['STATE_BUCKET']}/o/{urllib.parse.quote(obj, safe='')}?alt=media"
-          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['ACCESS_TOKEN']})
-          try:
-              with urllib.request.urlopen(request) as response:
-                  data = response.read()
-              json.loads(data)
-              state.write_bytes(data)
-              state.chmod(0o600)
-              print('Loaded existing dev application state snapshot.')
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise RuntimeError(f'State snapshot fetch failed: HTTP {error.code}') from None
-              state.unlink(missing_ok=True)
-              print('No dev application state exists; planning a new stack locally.')
-          override = {'terraform': {'backend': {'local': {'path': str(state)}}}}
-          pathlib.Path('stacks/03-application/backend_override.tf.json').write_text(json.dumps(override))
-          PYCODE
+        run: python3 scripts/read-dev-state.py
 
       - name: terraform init (local snapshot backend)
         working-directory: stacks/03-application
@@ -134,41 +129,11 @@ jobs:
 
       - name: conftest OPA policy check
         working-directory: stacks/03-application
-        run: |
-          set -euo pipefail
-          release=https://github.com/open-policy-agent/conftest/releases/download/v0.56.0
-          curl --fail --silent --show-error --location "$release/conftest_0.56.0_Linux_x86_64.tar.gz" -o conftest_0.56.0_Linux_x86_64.tar.gz
-          curl --fail --silent --show-error --location "$release/checksums.txt" -o checksums.txt
-          grep ' conftest_0.56.0_Linux_x86_64.tar.gz$' checksums.txt | sha256sum --check --strict
-          tar xzf conftest_0.56.0_Linux_x86_64.tar.gz conftest
-          ./conftest test plan.json --policy "$GITHUB_WORKSPACE/policies" --all-namespaces
+        run: bash "$GITHUB_WORKSPACE/scripts/check-plan-policy.sh"
 
-      # Publish only allowlisted Artifact Registry fields; never raw plans/state.
       - name: Plan review summary
-        working-directory: stacks/03-application
-        run: |
-          python3 - <<'PY'
-          import json, os
-          from collections import Counter
-          plan = json.load(open('plan.json'))
-          changes = plan.get('resource_changes', [])
-          for r in changes:
-              assert r['address'] == 'module.application.google_artifact_registry_repository.docker', 'Unexpected resource'
-              assert r['change']['actions'] in [['create'], ['no-op']], 'Unexpected mutation; review privately'
-              after = r['change']['after']
-              assert after['project'] == 'ritru-fc-dev-01', 'Unexpected project'
-              assert after['location'] == 'asia-south1', 'Unexpected region'
-              assert after['repository_id'] == 'flashcart-docker', 'Unexpected repository'
-              assert after['format'] == 'DOCKER', 'Unexpected repository format'
-              assert after['docker_config'][0]['immutable_tags'] is True, 'Immutable tags required'
-          counts = Counter(','.join(r['change']['actions']) for r in changes)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write('### FlashCart Artifact Registry dev plan\n\n')
-              out.write('Target: `ritru-fc-dev-01`, `asia-south1`, `flashcart-docker` (DOCKER, immutable tags).\n\n')
-              for action, count in sorted(counts.items()):
-                  out.write(f'- {action}: {count}\n')
-              out.write('\nNo apply job exists. Review the plan privately before authorizing any deployment.\n')
-          PY
+        id: review
+        run: python3 scripts/check-dev-plan.py "$STACK/plan.json"
 
       - name: Remove local plan files
         if: always()

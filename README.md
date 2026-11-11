@@ -12,7 +12,7 @@ Enterprise multi-environment Terraform repository for the **FlashCart Serverless
   - `stacks/04-edge` (Serverless NEGs, Cloud Armor WAF + rate limiting, Cloud CDN on catalog, Global External ALB + optional Google-managed TLS)
   - `stacks/05-extras` (Cloud Deploy canary pipeline + Monitoring alerts, Zero-ETL BigQuery Pub/Sub subscription, Cloud Run Jobs `outbox-relay` + `fulfillment-job`, Cloud Scheduler, OTel Secret, optional AlloyDB)
 
-## Fork qualification: dev-only PR planning
+## Fork qualification: dev-only planning and deployment preparation
 
 This fork currently qualifies **only** `stacks/03-application` with
 `env/dev.tfvars` in `ritru-fc-dev-01`. The expected plan creates one immutable-tag
@@ -27,12 +27,14 @@ same-repository feat/flashcart-artifact-registry PR -> main
   -> allowlisted review summary; no apply job
 ```
 
-There is no push trigger or manual Terraform trigger. Drift scanning is paused.
-Staging/prod jobs, apply inputs, deployment credentials, and saved plan uploads
-are absent. Plans use an ephemeral local backend with a read-only snapshot of the exact dev
+There is no push trigger. Drift scanning is paused. PRs remain read-only.
+A separate manual deployment workflow is prepared for main with a required
+environment review, a default-off apply switch, and no configured apply identity.
+Staging/prod paths and saved plan uploads are absent. Plans use an ephemeral local backend with a read-only snapshot of the exact dev
 application state object (HTTP 404 means a new stack; other errors stop planning).
 GCS backend initialization itself writes a lock and initial state for new stacks,
-so CI never initializes that remote backend. Local snapshots run with `-lock=false`
+so read-only CI never initializes that remote backend. Only a future authorized
+apply job may initialize it after environment approval. Local snapshots run with `-lock=false`
 and are removed after the job. Counts and allowlisted resource details appear in the Actions
 job summary; raw plans, state, and OIDC credential files are not published.
 A deployment must produce and review a fresh plan after separate authorization;
@@ -47,13 +49,15 @@ this PR's read-only snapshot must not be reused for apply.
 | `GCP_STATE_BUCKET` | `ritru-tfstate-586582398977` |
 | `TF_STATE_PREFIX` | `gcp-02-flashcart` |
 
-`GCP_APPLY_SA` is deliberately not configured. These variables are identifiers,
+`GCP_APPLY_SA`, `GCP_DEV_APPLY_SA` and `GCP_DEV_APPLY_WIF_PROVIDER` are deliberately
+not configured. `FLASHCART_DEV_APPLY_ENABLED=false`. These variables are identifiers,
 not credentials; no service-account key is needed.
 
 The separate WIF pool/provider checks numeric repository ID `1453724177`, owner
 ID `334222478`, repository name, PR event, `main` base, the exact feature branch,
 and the `infra.yml` PR merge ref. Other branches, pushes, scheduled runs, and the
-upstream repository do not meet this provider's trust condition. The workflow
+upstream repository do not meet this provider's trust condition. A separate
+read-only provider permits only the manual workflow and reusable plan on main. The workflow
 also rejects forks before requesting cloud authentication.
 
 The plan account has `roles/artifactregistry.reader` in the dev project. Its
@@ -65,8 +69,10 @@ and trust were left unchanged.
 The default branch still contains the old workflows until this PR is merged.
 The newly configured WIF provider rejects their push/manual/scheduled events,
 and this fork has no apply identity configured. Do not merge or authorize an
-apply until the actual PR plan and its checks have been reviewed. Any future
-apply or promotion workflow requires a separate design and explicit approval.
+apply until the actual PR plan and its checks have been reviewed. The prepared
+manual apply workflow requires separate merge/deployment authorization and
+scoped apply identity provisioning. See [the dev deployment guide](docs/DEV-DEPLOYMENT.md)
+for the gate configuration, plan comparison, exact remaining blockers and evidence limits.
 
 ### Local validation without cloud access
 

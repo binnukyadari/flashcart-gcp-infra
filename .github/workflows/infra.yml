@@ -10,11 +10,25 @@ on:
       - 'policies/**'
       - '.github/workflows/**'
       - '.tflint.hcl'
+      - 'scripts/**'
+      - 'tests/**'
 
 permissions:
   contents: read
 
 jobs:
+  workflow-safety:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test deployment safety
+        run: |
+          python3 -m venv "$RUNNER_TEMP/workflow-tests"
+          "$RUNNER_TEMP/workflow-tests/bin/pip" install -r tests/requirements.txt
+          "$RUNNER_TEMP/workflow-tests/bin/python" -m unittest discover -s tests -v
+
   dev-plan:
     if: >-
       github.repository == 'binnukyadari/flashcart-gcp-infra' &&
