@@ -3,8 +3,8 @@
 All 16 edge resources are created in the private remote state. Temporary DNS
 resolves to `136.82.74.122`; HTTP returns 301 to HTTPS. IAP is enabled, the IAP
 service identity has Cloud Run invoker access, trainer-only IAP access is set,
-and Cloud Armor is attached. Managed TLS is still provisioning; do not treat
-this as a verified usable HTTPS URL until the certificate becomes ACTIVE.
+and Cloud Armor is attached. Managed TLS is ACTIVE and the HTTPS endpoint
+redirects an anonymous request to Google sign-in.
 
 Training URL: `https://flashcart-136-82-74-122.sslip.io`.
 
