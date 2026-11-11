@@ -137,10 +137,10 @@ jobs:
         run: |
           set -euo pipefail
           release=https://github.com/open-policy-agent/conftest/releases/download/v0.56.0
-          curl --fail --silent --show-error --location "$release/conftest_0.56.0_Linux_x86_64.tar.gz" -o conftest.tar.gz
+          curl --fail --silent --show-error --location "$release/conftest_0.56.0_Linux_x86_64.tar.gz" -o conftest_0.56.0_Linux_x86_64.tar.gz
           curl --fail --silent --show-error --location "$release/checksums.txt" -o checksums.txt
           grep ' conftest_0.56.0_Linux_x86_64.tar.gz$' checksums.txt | sha256sum --check --strict
-          tar xzf conftest.tar.gz conftest
+          tar xzf conftest_0.56.0_Linux_x86_64.tar.gz conftest
           ./conftest test plan.json --policy "$GITHUB_WORKSPACE/policies" --all-namespaces
 
       # Publish only allowlisted Artifact Registry fields; never raw plans/state.
