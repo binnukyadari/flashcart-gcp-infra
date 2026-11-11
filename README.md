@@ -10,14 +10,45 @@ stored order summary. Start with [the practical training guide](docs/TRAINING.md
   inventory instance/database, Firestore default database, Pub/Sub and invoices bucket.
 - Artifact Registry `flashcart-docker`: created and verified by approved
   [run 42996975357](https://github.com/binnukyadari/flashcart-gcp-infra/actions/runs/42996975357).
-- Backend: [binnukyadari/flashcart-backend](https://github.com/binnukyadari/flashcart-backend).
-  [Image run 43002866676](https://github.com/binnukyadari/flashcart-backend/actions/runs/43002866676)
-  passed 38 tests and published a tested linux/amd64 image. The backend stack pins
-  that image digest; image publication alone does not deploy the API.
-- `stacks/04-backend`: connected dev demo prepared for plan review/deployment.
-  A green plan is not proof of a deployed or working API; verify the live round trip.
-- Load balancer, WAF, analytics, scheduler and canary deployment are later lessons.
-  No staging/prod changes are part of this training delivery.
+- Backend/frontend: deployed and verified by [run 43050291973](https://github.com/binnukyadari/flashcart-gcp-infra/actions/runs/43050291973).
+  The tested image passed 39 tests. Live verification confirmed order creation,
+  idempotent replay, one stock deduction, worker delivery, a Pub/Sub event and a
+  private GCS summary.
+- `stacks/05-edge`: HTTPS load balancer, temporary DNS hostname, managed TLS,
+  Cloud Armor WAF/rate limiting and IAP access for `contact@ritru.com`.
+  See [edge setup and verification](docs/EDGE.md) for current readiness.
+- No staging/prod changes are part of this training delivery.
+
+## Final architecture
+
+```mermaid
+flowchart TD
+    Browser[Trainer browser] --> DNS[Temporary sslip.io DNS]
+    DNS --> LB[Global external HTTPS load balancer]
+    LB --> Armor[Cloud Armor: SQLi / XSS / per-IP throttling]
+    Armor --> IAP[IAP: Google sign-in / contact@ritru.com]
+    IAP --> NEG[Regional serverless NEG]
+    NEG --> API[Cloud Run: storefront + FastAPI]
+    API --> Key[Secret Manager: API key]
+    API --> FS[Firestore: orders / idempotency / outbox]
+    API --> SQL[Private Cloud SQL: inventory / reservations]
+    Worker[Cloud Run worker job: explicit execution] --> FS
+    Worker --> SQL
+    Worker --> Topic[Pub/Sub: order.created.v1]
+    Worker --> GCS[Private GCS: order summaries]
+    Bootstrap[One-shot bootstrap job] --> SQL
+    GH[GitHub Actions: tests / image build] --> AR[Artifact Registry: digest-pinned image]
+    AR --> API
+    AR --> Worker
+    TF[Terraform: separate dev state per stack] -. provisions .-> LB
+    TF -. provisions .-> API
+```
+
+The edge is the intended browser entry point. IAP authenticates the trainer;
+Cloud Armor filters requests; the application API key remains required for API
+calls. Cloud Run IAM has no `allUsers` grant. Until ingress hardening is applied,
+the original authenticated proxy remains an administrative access path outside
+Cloud Armor. The worker is manual, not scheduled; no payments or shipping occur.
 
 ## Read the stacks in order
 
@@ -26,6 +57,7 @@ stored order summary. Start with [the practical training guide](docs/TRAINING.md
 | `stacks/01-network`, `modules/vpc-network` | Existing VPC, Cloud Run subnet, private service access, NAT and IAP firewall |
 | `stacks/02-data`, `modules/data-tier` | Existing SQL, Firestore, legacy Pub/Sub and invoice bucket |
 | `stacks/03-application`, `modules/application-tier` | Immutable-tag Docker repository |
+| `stacks/05-edge` | HTTPS edge, TLS, Cloud Armor and trainer-only IAP |
 | `stacks/04-backend` | Private API, bootstrap/worker jobs, runtime identities, secrets and compatible events |
 
 The backend stack preserves the earlier stacks and the legacy event topic/schema.
