@@ -22,33 +22,59 @@ stored order summary. Start with [the practical training guide](docs/TRAINING.md
 ## Final architecture
 
 ```mermaid
-flowchart TD
-    Browser[Trainer browser] --> DNS[Temporary sslip.io DNS]
-    DNS --> LB[Global external HTTPS load balancer]
-    LB --> Armor[Cloud Armor: SQLi / XSS / per-IP throttling]
-    Armor --> IAP[IAP: Google sign-in / contact@ritru.com]
-    IAP --> NEG[Regional serverless NEG]
-    NEG --> API[Cloud Run: storefront + FastAPI]
-    API --> Key[Secret Manager: API key]
-    API --> FS[Firestore: orders / idempotency / outbox]
-    API --> SQL[Private Cloud SQL: inventory / reservations]
-    Worker[Cloud Run worker job: explicit execution] --> FS
-    Worker --> SQL
-    Worker --> Topic[Pub/Sub: order.created.v1]
-    Worker --> GCS[Private GCS: order summaries]
-    Bootstrap[One-shot bootstrap job] --> SQL
-    GH[GitHub Actions: tests / image build] --> AR[Artifact Registry: digest-pinned image]
-    AR --> API
-    AR --> Worker
-    TF[Terraform: separate dev state per stack] -. provisions .-> LB
-    TF -. provisions .-> API
+flowchart TB
+    User[You: browser] --> DNS[sslip.io temporary DNS]
+    DNS --> HTTPS[HTTPS Load Balancer]
+    HTTPS --> Armor[Cloud Armor<br/>blocks SQLi/XSS, throttles traffic]
+    Armor --> IAP[IAP<br/>only contact@ritru.com]
+    IAP --> NEG[Serverless NEG]
+
+    subgraph Runtime[Cloud Run application]
+      NEG --> App[flashcart-api-dev<br/>storefront + FastAPI API]
+      Bootstrap[flashcart-bootstrap-dev<br/>one-time database setup] --> SQL
+      Worker[flashcart-worker-dev<br/>manual delivery job]
+    end
+
+    subgraph Data[Private data services]
+      Key[Secret Manager<br/>training API key]
+      FS[Firestore<br/>order, idempotency key, outbox]
+      SQL[Cloud SQL PostgreSQL<br/>product stock + reservations]
+      Topic[Pub/Sub<br/>order.created.v1 event]
+      GCS[Cloud Storage<br/>private order summary]
+    end
+
+    App -. reads .-> Key
+    App -->|1. save intent| FS
+    App -->|2. reserve stock| SQL
+    App -->|3. confirm + create outbox event| FS
+    Worker -->|4. read pending event| FS
+    Worker -->|5. read order + stock| SQL
+    Worker -->|6. publish event| Topic
+    Worker -->|7. write summary| GCS
+    Worker -->|8. mark delivered| FS
+
+    subgraph Delivery[Safe delivery pipeline]
+      Code[Backend source] --> CI[GitHub Actions<br/>tests + container smoke]
+      CI --> Image[Artifact Registry<br/>tested image digest]
+      Infra[Terraform + reviewed plan<br/>GitHub approval] --> HTTPS
+      Infra --> App
+      Image --> App
+      Image --> Worker
+      Image --> Bootstrap
+    end
 ```
+
+How to read it: the **top line** is what protects and serves the browser, the
+**middle** is what happens during an order, and the **bottom** is how tested code
+reaches Cloud Run. An order is confirmed after stock is reserved. It reaches
+Pub/Sub and Cloud Storage only when you manually run the worker. There are no
+payments or shipping.
 
 The edge is the intended browser entry point. IAP authenticates the trainer;
 Cloud Armor filters requests; the application API key remains required for API
-calls. Cloud Run IAM has no `allUsers` grant. Until ingress hardening is applied,
-the original authenticated proxy remains an administrative access path outside
-Cloud Armor. The worker is manual, not scheduled; no payments or shipping occur.
+calls. Cloud Run IAM has no `allUsers` grant. The original authenticated proxy
+remains an administrative access path outside Cloud Armor until ingress
+hardening is separately reviewed.
 
 ## Read the stacks in order
 
