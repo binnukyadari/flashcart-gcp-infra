@@ -12,19 +12,74 @@ Enterprise multi-environment Terraform repository for the **FlashCart Serverless
   - `stacks/04-edge` (Serverless NEGs, Cloud Armor WAF + rate limiting, Cloud CDN on catalog, Global External ALB + optional Google-managed TLS)
   - `stacks/05-extras` (Cloud Deploy canary pipeline + Monitoring alerts, Zero-ETL BigQuery Pub/Sub subscription, Cloud Run Jobs `outbox-relay` + `fulfillment-job`, Cloud Scheduler, OTel Secret, optional AlloyDB)
 
-## Foundation & State Configuration
-- **Bootstrap repo:** `MaripeddiSupraj/gcp-foundation`
-- **Remote GCS State Bucket:** `ritru-tfstate-586582398977`
-- **State Prefix (`TF_STATE_PREFIX`):** `gcp-02-flashcart`
-- **Live Dev Project:** `ritru-fc-dev-01`
-- **GitHub OIDC Plan SA:** `ritru-tf-plan@ritru-tf-seed-01.iam.gserviceaccount.com`
-- **GitHub OIDC Dev Apply SA:** `ritru-tf-apply-dev@ritru-tf-seed-01.iam.gserviceaccount.com`
+## Fork qualification: dev-only planning and deployment preparation
 
-## Local Usage
-```bash
-cp scripts/backend.env.example scripts/backend.env
-# Fill GCP_STATE_BUCKET and TF_STATE_PREFIX=gcp-02-flashcart
+This fork currently qualifies **only** `stacks/03-application` with
+`env/dev.tfvars` in `ritru-fc-dev-01`. The expected plan creates one immutable-tag
+Docker repository, `flashcart-docker`, in `asia-south1`. Network and data stacks
+are intentionally excluded from this PR's planning.
 
-./scripts/tf.sh stacks/01-network dev plan
-./scripts/tf.sh stacks/01-network dev apply
+```text
+same-repository feat/flashcart-artifact-registry PR -> main
+  -> fixed dev Artifact Registry stack
+  -> keyless, read-only plan identity
+  -> format / validate / lint / plan / OPA / resource scope checks
+  -> allowlisted review summary; no apply job
 ```
+
+There is no push trigger. Drift scanning is paused. PRs remain read-only.
+A separate manual deployment workflow is prepared for main with a required
+environment review, a default-off apply switch, and no configured apply identity.
+Staging/prod paths and saved plan uploads are absent. Plans use an ephemeral local backend with a read-only snapshot of the exact dev
+application state object (HTTP 404 means a new stack; other errors stop planning).
+GCS backend initialization itself writes a lock and initial state for new stacks,
+so read-only CI never initializes that remote backend. Only a future authorized
+apply job may initialize it after environment approval. Local snapshots run with `-lock=false`
+and are removed after the job. Counts and allowlisted resource details appear in the Actions
+job summary; raw plans, state, and OIDC credential files are not published.
+A deployment must produce and review a fresh plan after separate authorization;
+this PR's read-only snapshot must not be reused for apply.
+
+### Connected settings
+
+| Repository variable | Value |
+| --- | --- |
+| `GCP_WIF_PROVIDER` | `projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-pr` |
+| `GCP_PLAN_SA` | `flashcart-dev-pr-plan@ritru-tf-seed-01.iam.gserviceaccount.com` |
+| `GCP_STATE_BUCKET` | `ritru-tfstate-586582398977` |
+| `TF_STATE_PREFIX` | `gcp-02-flashcart` |
+
+`GCP_APPLY_SA`, `GCP_DEV_APPLY_SA` and `GCP_DEV_APPLY_WIF_PROVIDER` are deliberately
+not configured. `FLASHCART_DEV_APPLY_ENABLED=false`. These variables are identifiers,
+not credentials; no service-account key is needed.
+
+The separate WIF pool/provider checks numeric repository ID `1453724177`, owner
+ID `334222478`, repository name, PR event, `main` base, the exact feature branch,
+and the `infra.yml` PR merge ref. Other branches, pushes, scheduled runs, and the
+upstream repository do not meet this provider's trust condition. A separate
+read-only provider permits only the manual workflow and reusable plan on main. The workflow
+also rejects forks before requesting cloud authentication.
+
+The plan account has `roles/artifactregistry.reader` in the dev project. Its
+conditional `roles/storage.objectViewer` bucket grant allows object reads only
+under `gcp-02-flashcart/stacks/03-application/dev/`. The IAM condition excludes bucket-level object listing and all other state
+prefixes. CI reads the exact object directly; it does not discover workspaces. There are no state write or lock permissions. Existing upstream identities
+and trust were left unchanged.
+
+The default branch still contains the old workflows until this PR is merged.
+The newly configured WIF provider rejects their push/manual/scheduled events,
+and this fork has no apply identity configured. Do not merge or authorize an
+apply until the actual PR plan and its checks have been reviewed. The prepared
+manual apply workflow requires separate merge/deployment authorization and
+scoped apply identity provisioning. See [the dev deployment guide](docs/DEV-DEPLOYMENT.md)
+for the gate configuration, plan comparison, exact remaining blockers and evidence limits.
+
+### Local validation without cloud access
+
+```bash
+terraform fmt -check -recursive modules/application-tier stacks/03-application
+terraform -chdir=stacks/03-application init -backend=false
+terraform -chdir=stacks/03-application validate
+```
+
+Do not use the legacy local helper's apply/destroy commands during qualification.

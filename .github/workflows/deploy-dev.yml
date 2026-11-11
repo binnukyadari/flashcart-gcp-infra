@@ -1,0 +1,134 @@
+name: FlashCart dev deployment (manual approval)
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Request dev registry creation after plan review and environment approval'
+        type: boolean
+        default: false
+      confirmation:
+        description: 'For deployment, enter ritru-fc-dev-01/flashcart-docker'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flashcart-artifact-registry-dev-deployment
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: >-
+      github.repository == 'binnukyadari/flashcart-gcp-infra' &&
+      github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/terraform-stack.yml
+
+  apply:
+    name: Approved dev registry creation
+    needs: plan
+    if: >-
+      github.repository == 'binnukyadari/flashcart-gcp-infra' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.deploy &&
+      inputs.confirmation == 'ritru-fc-dev-01/flashcart-docker' &&
+      vars.FLASHCART_DEV_APPLY_ENABLED == 'true' &&
+      needs.plan.outputs.creates == '1'
+    environment: dev-artifact-registry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      STACK: stacks/03-application
+      EXPECTED_PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+      REVIEWED_PLAN_AT: ${{ needs.plan.outputs.planned_at }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # This step runs only AFTER GitHub's required environment review.
+      - name: Check authorization settings and reviewed source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPLY_PROVIDER: ${{ vars.GCP_DEV_APPLY_WIF_PROVIDER }}
+          APPLY_SA: ${{ vars.GCP_DEV_APPLY_SA }}
+        run: |
+          set -euo pipefail
+          test "$APPLY_PROVIDER" = 'projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-apply/providers/github-approved-dev'
+          test "$APPLY_SA" = 'flashcart-dev-ar-apply@ritru-tf-seed-01.iam.gserviceaccount.com'
+          test -n "$EXPECTED_PLAN_DIGEST"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          python3 scripts/check-dev-plan.py --check-age
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_DEV_APPLY_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEV_APPLY_SA }}
+          project_id: ritru-fc-dev-01
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.16.6'
+          terraform_wrapper: false
+
+      - name: Initialize exact remote dev backend
+        working-directory: stacks/03-application
+        run: |
+          set -euo pipefail
+          terraform init -lockfile=readonly \
+            -backend-config=bucket=ritru-tfstate-586582398977 \
+            -backend-config=prefix=gcp-02-flashcart/stacks/03-application/dev
+          terraform validate
+
+      - name: Generate fresh saved plan after approval
+        working-directory: stacks/03-application
+        run: |
+          set +e
+          terraform plan -no-color -var-file=env/dev.tfvars -out=tfplan -lock-timeout=5m -detailed-exitcode > plan.log
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+          terraform show -json tfplan > plan.json
+
+      - name: Check policies and match the reviewed plan
+        working-directory: stacks/03-application
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/check-plan-policy.sh"
+          python3 "$GITHUB_WORKSPACE/scripts/check-dev-plan.py" plan.json
+
+      - name: Apply the checked saved plan
+        working-directory: stacks/03-application
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/check-dev-plan.py" --check-age
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          terraform apply -no-color -lock-timeout=5m tfplan > apply.log
+          terraform output -json > dev-outputs.json
+          python3 - <<'PYCODE'
+          import json
+          outputs = json.load(open('dev-outputs.json'))
+          assert outputs['artifact_registry_repository_id']['value'] == 'flashcart-docker'
+          assert outputs['artifact_registry_repository_url']['value'] == 'asia-south1-docker.pkg.dev/ritru-fc-dev-01/flashcart-docker'
+          PYCODE
+          echo '### Dev registry creation completed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Terraform applied the saved plan that matched the reviewed fingerprint.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary plan files
+        if: always()
+        run: rm -f "$STACK/tfplan" "$STACK/plan.json" "$STACK/plan.log" "$STACK/apply.log" "$STACK/dev-outputs.json"

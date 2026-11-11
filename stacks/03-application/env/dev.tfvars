@@ -1,0 +1,5 @@
+project_id  = "ritru-fc-dev-01"
+project     = "flashcart"
+environment = "dev"
+region      = "asia-south1"
+owner       = "platform-team"

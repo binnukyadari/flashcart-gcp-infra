@@ -2,114 +2,39 @@ name: infra
 
 on:
   pull_request:
-    paths: ["stacks/**", "modules/**", "policies/**"]
-  push:
     branches: [main]
-    paths: ["stacks/**", "modules/**"]
-  workflow_dispatch:
-    inputs:
-      stack:
-        description: "Stack path (e.g. stacks/01-network)"
-        required: true
-      environment:
-        description: "dev | staging | prod"
-        required: true
-        default: dev
-      apply:
-        description: "Apply after plan"
-        type: boolean
-        default: false
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'stacks/**'
+      - 'modules/**'
+      - 'policies/**'
+      - '.github/workflows/**'
+      - '.tflint.hcl'
+      - 'scripts/**'
+      - 'tests/**'
 
 permissions:
-  id-token: write
   contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
-  detect:
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    outputs:
-      dev: ${{ steps.find.outputs.dev }}
-      staging: ${{ steps.find.outputs.staging }}
-      prod: ${{ steps.find.outputs.prod }}
+  workflow-safety:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-      - id: find
+          persist-credentials: false
+      - name: Test deployment safety
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-          else
-            BASE="${{ github.event.before }}"
-          fi
-          changed=$(git diff --name-only "$BASE" HEAD)
-          # If shared modules changed, plan all stacks; otherwise only stacks containing modified files.
-          if echo "$changed" | grep -qE '^(modules|policies)/'; then
-            stacks=$(find stacks -name backend.tf -exec dirname {} \; | sort -u)
-          else
-            stacks=$(echo "$changed" | while read -r f; do
-              d=$(dirname "$f")
-              while [ "$d" != "." ] && [ ! -f "$d/backend.tf" ]; do d=$(dirname "$d"); done
-              [ -f "$d/backend.tf" ] && echo "$d"
-            done | sort -u)
-          fi
+          python3 -m venv "$RUNNER_TEMP/workflow-tests"
+          "$RUNNER_TEMP/workflow-tests/bin/pip" install -r tests/requirements.txt
+          "$RUNNER_TEMP/workflow-tests/bin/python" -m unittest discover -s tests -v
 
-          pairs=$(for s in $stacks; do
-            for f in "$s"/env/*.tfvars; do
-              [ -f "$f" ] && jq -cn --arg s "$s" --arg e "$(basename "$f" .tfvars)" '{stack:$s, environment:$e}'
-            done
-          done | jq -cs .)
-
-          echo "dev=$(echo "$pairs" | jq -c '[.[] | select(.environment == "dev")]')" >> "$GITHUB_OUTPUT"
-          echo "staging=$(echo "$pairs" | jq -c '[.[] | select(.environment == "staging")]')" >> "$GITHUB_OUTPUT"
-          echo "prod=$(echo "$pairs" | jq -c '[.[] | select(.environment == "prod")]')" >> "$GITHUB_OUTPUT"
-
-  dev:
-    needs: detect
-    if: needs.detect.outputs.dev != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.detect.outputs.dev) }}
+  dev-plan:
+    if: >-
+      github.repository == 'binnukyadari/flashcart-gcp-infra' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feat/flashcart-artifact-registry'
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/terraform-stack.yml
-    with:
-      stack: ${{ matrix.stack }}
-      environment: ${{ matrix.environment }}
-      apply: ${{ github.event_name == 'push' }}
-
-  staging:
-    needs: [detect, dev]
-    if: always() && needs.detect.outputs.staging != '[]' && (needs.dev.result == 'success' || needs.dev.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.detect.outputs.staging) }}
-    uses: ./.github/workflows/terraform-stack.yml
-    with:
-      stack: ${{ matrix.stack }}
-      environment: ${{ matrix.environment }}
-      apply: ${{ github.event_name == 'push' }}
-
-  prod:
-    needs: [detect, staging]
-    if: always() && needs.detect.outputs.prod != '[]' && (needs.staging.result == 'success' || needs.staging.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.detect.outputs.prod) }}
-    uses: ./.github/workflows/terraform-stack.yml
-    with:
-      stack: ${{ matrix.stack }}
-      environment: ${{ matrix.environment }}
-      apply: ${{ github.event_name == 'push' }}
-
-  manual:
-    if: github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/terraform-stack.yml
-    with:
-      stack: ${{ inputs.stack }}
-      environment: ${{ inputs.environment }}
-      apply: ${{ inputs.apply }}

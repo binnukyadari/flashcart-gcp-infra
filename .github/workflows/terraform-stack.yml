@@ -2,186 +2,141 @@ name: terraform-stack
 
 on:
   workflow_call:
-    inputs:
-      stack:
-        description: "Relative path to stack containing backend.tf (e.g. stacks/01-network)"
-        type: string
-        required: true
-      environment:
-        description: "Target environment matching env/<env>.tfvars and GitHub Environment"
-        type: string
-        required: true
-      apply:
-        description: "Apply the saved plan artifact after validation"
-        type: boolean
-        default: false
-      drift_check:
-        description: "Create a GitHub drift issue if plan detects out-of-band changes"
-        type: boolean
-        default: false
-      terraform_version:
-        description: "Terraform CLI version"
-        type: string
-        default: "1.16.6"
+    outputs:
+      plan_digest:
+        value: ${{ jobs.plan.outputs.plan_digest }}
+      creates:
+        value: ${{ jobs.plan.outputs.creates }}
+      planned_at:
+        value: ${{ jobs.plan.outputs.planned_at }}
 
 permissions:
-  id-token: write
   contents: read
-  pull-requests: write
-  issues: write
 
 env:
-  TF_IN_AUTOMATION: "true"
-  TF_INPUT: "false"
-  STACK: ${{ inputs.stack }}
-  ENVIRONMENT: ${{ inputs.environment }}
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  STACK: stacks/03-application
+  ENVIRONMENT: dev
 
 jobs:
   plan:
-    name: plan ${{ inputs.stack }} (${{ inputs.environment }})
-    runs-on: ubuntu-latest
-    concurrency:
-      group: tf-${{ inputs.stack }}-${{ inputs.environment }}
-      cancel-in-progress: false
+    name: plan Artifact Registry (dev only)
+    if: >-
+      github.repository == 'binnukyadari/flashcart-gcp-infra' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.base_ref == 'main' &&
+        github.head_ref == 'feat/flashcart-artifact-registry') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+        github.workflow_ref == 'binnukyadari/flashcart-gcp-infra/.github/workflows/deploy-dev.yml@refs/heads/main'))
     outputs:
-      changes: ${{ steps.plan.outputs.changes }}
-      artifact: ${{ steps.names.outputs.artifact }}
-
+      plan_digest: ${{ steps.review.outputs.plan_digest }}
+      creates: ${{ steps.review.outputs.creates }}
+      planned_at: ${{ steps.review.outputs.planned_at }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: flashcart-artifact-registry-dev-plan
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-
-      - id: names
-        run: echo "artifact=tfplan-$(echo "$STACK" | tr '/' '-')-$ENVIRONMENT" >> "$GITHUB_OUTPUT"
-
-      # Keyless OIDC login using the READ-ONLY plan Service Account
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          persist-credentials: false
+
+      - name: Check dev planning configuration
+        env:
+          WIF_PROVIDER: ${{ github.event_name == 'pull_request' && vars.GCP_WIF_PROVIDER || vars.GCP_MANUAL_PLAN_WIF_PROVIDER }}
+          PLAN_SA: ${{ vars.GCP_PLAN_SA }}
+          STATE_BUCKET: ${{ vars.GCP_STATE_BUCKET }}
+          STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
+        run: |
+          set -euo pipefail
+          case "$WIF_PROVIDER" in
+            projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-pr|projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-manual-plan) ;;
+            *) exit 1 ;;
+          esac
+          test "$PLAN_SA" = 'flashcart-dev-pr-plan@ritru-tf-seed-01.iam.gserviceaccount.com'
+          test "$STATE_BUCKET" = 'ritru-tfstate-586582398977'
+          test "$STATE_PREFIX" = 'gcp-02-flashcart'
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path('stacks/03-application/env/dev.tfvars').read_text()
+          for key, expected in [('project_id', 'ritru-fc-dev-01'), ('environment', 'dev')]:
+              values = re.findall(rf'^\s*{key}\s*=\s*"([^"]+)"\s*$', text, re.M)
+              assert values == [expected], f'Unexpected {key}: dev planning only'
+          PY
+
+      # This identity can read Artifact Registry and this stack's dev state only.
+      - id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ github.event_name == 'pull_request' && vars.GCP_WIF_PROVIDER || vars.GCP_MANUAL_PLAN_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_PLAN_SA }}
+          project_id: ritru-fc-dev-01
+          token_format: access_token
+          access_token_lifetime: 900s
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
-          terraform_version: ${{ inputs.terraform_version }}
+          terraform_version: '1.16.6'
           terraform_wrapper: false
 
-      - name: terraform init
-        working-directory: ${{ inputs.stack }}
-        run: |
-          PFX="${{ vars.TF_STATE_PREFIX }}"
-          terraform init \
-            -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" \
-            -backend-config="prefix=${PFX:+${PFX}/}${STACK}/${ENVIRONMENT}"
+      # A new GCS backend writes initial state even during init. Use an isolated,
+      # read-only snapshot so qualification cannot create state or lock objects.
+      - name: Read dev state snapshot
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          STATE_BUCKET: ${{ vars.GCP_STATE_BUCKET }}
+          STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
+        run: python3 scripts/read-dev-state.py
+
+      - name: terraform init (local snapshot backend)
+        working-directory: stacks/03-application
+        run: terraform init -lockfile=readonly
 
       - name: fmt and validate
-        working-directory: ${{ inputs.stack }}
+        working-directory: stacks/03-application
         run: |
-          terraform fmt -check -recursive
+          terraform fmt -check -recursive ../../modules/application-tier .
           terraform validate
 
-      - uses: terraform-linters/setup-tflint@v4
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4
+        with:
+          tflint_version: v0.59.1
       - name: tflint
-        working-directory: ${{ inputs.stack }}
+        working-directory: stacks/03-application
         run: |
           tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
           tflint --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
 
-      - name: checkov
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: ${{ inputs.stack }}
-          framework: terraform
-          quiet: true
-          soft_fail: true
-
-      - name: terraform plan
-        id: plan
-        working-directory: ${{ inputs.stack }}
+      - name: terraform plan (read only, no state lock writes)
+        working-directory: stacks/03-application
         run: |
           set +e
-          terraform plan -var-file="env/${ENVIRONMENT}.tfvars" -out=tfplan -lock-timeout=5m -detailed-exitcode
+          terraform plan -no-color -var-file=env/dev.tfvars -out=tfplan -lock=false -detailed-exitcode > plan.log
           code=$?
           set -e
-          if [ "$code" -eq 1 ]; then exit 1; fi
-          if [ "$code" -eq 2 ]; then
-            echo "changes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changes=false" >> "$GITHUB_OUTPUT"
-          fi
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
           terraform show -no-color tfplan > plan.txt
           terraform show -json tfplan > plan.json
 
       - name: conftest OPA policy check
-        working-directory: ${{ inputs.stack }}
+        working-directory: stacks/03-application
+        run: bash "$GITHUB_WORKSPACE/scripts/check-plan-policy.sh"
+
+      - name: Plan review summary
+        id: review
+        run: python3 scripts/check-dev-plan.py "$STACK/plan.json"
+
+      - name: Remove local plan files
+        if: always()
         run: |
-          curl -sSL https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz | tar xz conftest
-          ./conftest test plan.json --policy "$GITHUB_WORKSPACE/policies" --all-namespaces
-
-      - name: comment plan on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let plan = fs.readFileSync(`${process.env.STACK}/plan.txt`, 'utf8');
-            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated)';
-            const body = `### Terraform Plan: \`${process.env.STACK}\` (${process.env.ENVIRONMENT})\n<details><summary>View plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>`;
-            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
-
-      - name: open drift issue
-        if: inputs.drift_check && steps.plan.outputs.changes == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh issue create \
-            --title "Drift detected: ${STACK} (${ENVIRONMENT})" \
-            --body "Nightly plan detected out-of-band changes. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --label drift || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.names.outputs.artifact }}
-          path: |
-            ${{ inputs.stack }}/tfplan
-            ${{ inputs.stack }}/.terraform.lock.hcl
-          retention-days: 5
-
-  apply:
-    name: apply ${{ inputs.stack }} (${{ inputs.environment }})
-    needs: plan
-    if: inputs.apply && needs.plan.outputs.changes == 'true'
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    concurrency:
-      group: tf-${{ inputs.stack }}-${{ inputs.environment }}
-      cancel-in-progress: false
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # Keyless OIDC login scoped strictly to this GitHub Environment's Apply SA
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_APPLY_SA }}
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ inputs.terraform_version }}
-          terraform_wrapper: false
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.plan.outputs.artifact }}
-          path: ${{ inputs.stack }}
-
-      - name: terraform init
-        working-directory: ${{ inputs.stack }}
-        run: |
-          PFX="${{ vars.TF_STATE_PREFIX }}"
-          terraform init \
-            -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" \
-            -backend-config="prefix=${PFX:+${PFX}/}${STACK}/${ENVIRONMENT}"
-
-      - name: terraform apply saved plan
-        working-directory: ${{ inputs.stack }}
-        run: terraform apply -lock-timeout=5m tfplan
+          rm -f "$STACK/tfplan" "$STACK/plan.txt" "$STACK/plan.json" "$STACK/plan.log" "$STACK/backend_override.tf.json"
+          rm -f "$RUNNER_TEMP/flashcart-dev.tfstate" "$RUNNER_TEMP/flashcart-dev.tfstate.backup"
