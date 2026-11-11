@@ -72,6 +72,12 @@ As the configured trainer, authenticate gcloud with `contact@ritru.com`, then ru
 gcloud run services proxy flashcart-api-dev --project=ritru-fc-dev-01 --region=asia-south1 --port=18081
 ```
 
+Open <http://127.0.0.1:18081/> for the storefront served by the same Cloud Run
+service. Enter the training API key to browse stock and place synthetic orders.
+The key stays in page memory; pending requests keep their original idempotency
+key and body in session storage so interrupted checkouts can safely retry.
+Order confirmation means stock reserved; event delivery still needs the worker.
+
 The local proxy supplies Cloud Run authentication. Requests also need the API key
 from Secret Manager. Use environment variables in your own shell; never paste
 keys into screenshots, repositories or chat. The API exposes `/docs` for the
