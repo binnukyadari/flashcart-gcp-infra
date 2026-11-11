@@ -29,8 +29,11 @@ same-repository feat/flashcart-artifact-registry PR -> main
 
 There is no push trigger or manual Terraform trigger. Drift scanning is paused.
 Staging/prod jobs, apply inputs, deployment credentials, and saved plan uploads
-are absent. Plans run with `-lock=false` because this identity cannot write state
-or lock objects. Counts and allowlisted resource details appear in the Actions
+are absent. Plans use an ephemeral local backend with a read-only snapshot of the exact dev
+application state object (HTTP 404 means a new stack; other errors stop planning).
+GCS backend initialization itself writes a lock and initial state for new stacks,
+so CI never initializes that remote backend. Local snapshots run with `-lock=false`
+and are removed after the job. Counts and allowlisted resource details appear in the Actions
 job summary; raw plans, state, and OIDC credential files are not published.
 A deployment must produce and review a fresh plan after separate authorization;
 this PR's read-only snapshot must not be reused for apply.
@@ -55,10 +58,8 @@ also rejects forks before requesting cloud authentication.
 
 The plan account has `roles/artifactregistry.reader` in the dev project. Its
 conditional `roles/storage.objectViewer` bucket grant allows object reads only
-under `gcp-02-flashcart/stacks/03-application/dev/`. GCS backend workspace discovery
-also requires bucket-level object listing; object names elsewhere in this shared
-bucket can therefore be listed, but their contents cannot be read with this
-grant. There are no state write or lock permissions. Existing upstream identities
+under `gcp-02-flashcart/stacks/03-application/dev/`. The IAM condition excludes bucket-level object listing and all other state
+prefixes. CI reads the exact object directly; it does not discover workspaces. There are no state write or lock permissions. Existing upstream identities
 and trust were left unchanged.
 
 The default branch still contains the old workflows until this PR is merged.

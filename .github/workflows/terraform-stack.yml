@@ -58,27 +58,53 @@ jobs:
           PY
 
       # This identity can read Artifact Registry and this stack's dev state only.
-      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+      - id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_PLAN_SA }}
           project_id: ritru-fc-dev-01
+          token_format: access_token
+          access_token_lifetime: 900s
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: '1.16.6'
           terraform_wrapper: false
 
-      - name: terraform init
-        working-directory: stacks/03-application
+      # A new GCS backend writes initial state even during init. Use an isolated,
+      # read-only snapshot so qualification cannot create state or lock objects.
+      - name: Read dev state snapshot
         env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           STATE_BUCKET: ${{ vars.GCP_STATE_BUCKET }}
           STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
         run: |
-          set -euo pipefail
-          terraform init -lockfile=readonly \
-            -backend-config="bucket=$STATE_BUCKET" \
-            -backend-config="prefix=$STATE_PREFIX/$STACK/$ENVIRONMENT"
+          python3 - <<'PYCODE'
+          import json, os, pathlib, urllib.error, urllib.parse, urllib.request
+          state = pathlib.Path(os.environ['RUNNER_TEMP']) / 'flashcart-dev.tfstate'
+          obj = f"{os.environ['STATE_PREFIX']}/{os.environ['STACK']}/dev/default.tfstate"
+          url = f"https://storage.googleapis.com/storage/v1/b/{os.environ['STATE_BUCKET']}/o/{urllib.parse.quote(obj, safe='')}?alt=media"
+          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['ACCESS_TOKEN']})
+          try:
+              with urllib.request.urlopen(request) as response:
+                  data = response.read()
+              json.loads(data)
+              state.write_bytes(data)
+              state.chmod(0o600)
+              print('Loaded existing dev application state snapshot.')
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise RuntimeError(f'State snapshot fetch failed: HTTP {error.code}') from None
+              state.unlink(missing_ok=True)
+              print('No dev application state exists; planning a new stack locally.')
+          override = {'terraform': {'backend': {'local': {'path': str(state)}}}}
+          pathlib.Path('stacks/03-application/backend_override.tf.json').write_text(json.dumps(override))
+          PYCODE
+
+      - name: terraform init (local snapshot backend)
+        working-directory: stacks/03-application
+        run: terraform init -lockfile=readonly
 
       - name: fmt and validate
         working-directory: stacks/03-application
@@ -146,4 +172,6 @@ jobs:
 
       - name: Remove local plan files
         if: always()
-        run: rm -f "$STACK/tfplan" "$STACK/plan.txt" "$STACK/plan.json"
+        run: |
+          rm -f "$STACK/tfplan" "$STACK/plan.txt" "$STACK/plan.json" "$STACK/backend_override.tf.json"
+          rm -f "$RUNNER_TEMP/flashcart-dev.tfstate" "$RUNNER_TEMP/flashcart-dev.tfstate.backup"
