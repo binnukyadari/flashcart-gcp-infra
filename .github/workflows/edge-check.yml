@@ -1,0 +1,24 @@
+name: FlashCart dev edge validation
+on:
+  pull_request:
+    branches: [main]
+    paths: ['stacks/05-edge/**', '.github/workflows/edge-check.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.16.6'
+          terraform_wrapper: false
+      - name: Validate edge configuration without cloud credentials
+        working-directory: stacks/05-edge
+        run: |
+          terraform fmt -check .
+          terraform init -backend=false -lockfile=readonly
+          terraform validate
