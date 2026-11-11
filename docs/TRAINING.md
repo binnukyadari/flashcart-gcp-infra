@@ -116,3 +116,13 @@ belong to `ritru-fc-dev-01`. The backend Google provider explicitly sets
 quota/service enablement is evaluated there. Its identities need
 `serviceusage.services.use` in dev. Otherwise Cloud SQL/Pub/Sub can report that
 an API is disabled in the identity project even when it is enabled in dev.
+
+Before the first backend plan, ensure the dev control-plane APIs are enabled:
+
+```bash
+gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com --project=ritru-fc-dev-01
+```
+
+The existing foundation already enabled the workload APIs. Enabling these APIs
+does not create SQL instances or other workloads; it allows explicitly dev-billed
+identity/permission metadata requests.
