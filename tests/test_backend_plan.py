@@ -72,6 +72,16 @@ class BackendPlan(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 guard.check_plan(candidate)
 
+    def test_bucket_canonical_name_preserves_the_same_target(self):
+        candidate = plan()
+        resource = next(r for r in candidate['resource_changes'] if r['type'] == 'google_storage_bucket_iam_member')
+        resource['change']['after']['bucket'] = 'b/flashcart-dev-invoices-ritru-fc-dev-01'
+        self.assertEqual(guard.check_plan(candidate)[1], 33)
+        for other in ('another-bucket', 'b/another-bucket'):
+            resource['change']['after']['bucket'] = other
+            with self.assertRaises(ValueError):
+                guard.check_plan(candidate)
+
     def test_semantic_change_alters_fingerprint(self):
         candidate = plan()
         first = guard.check_plan(candidate)[0]

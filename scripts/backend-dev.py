@@ -78,7 +78,7 @@ def check_plan(plan):
         if kind == 'google_service_account' and after['account_id'] not in {'flashcart-api', 'flashcart-worker', 'flashcart-bootstrap'}:
             raise ValueError('Unexpected runtime identity')
         if kind == 'google_storage_bucket_iam_member':
-            if after['bucket'] != 'flashcart-dev-invoices-ritru-fc-dev-01' or not after['condition']:
+            if after['bucket'] not in {'flashcart-dev-invoices-ritru-fc-dev-01', 'b/flashcart-dev-invoices-ritru-fc-dev-01'} or not after['condition']:
                 raise ValueError('Invoice access must be conditioned on the existing bucket')
             if after['condition'][0]['expression'] != "resource.name.startsWith('projects/_/buckets/flashcart-dev-invoices-ritru-fc-dev-01/objects/invoices/')":
                 raise ValueError('Invoice access must use the invoices prefix')
