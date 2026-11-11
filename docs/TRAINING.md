@@ -107,3 +107,12 @@ understand consumer deduplication. No payment or shipment has occurred.
 
 For the foundation, read the existing network/data stacks and the earlier
 registry stack separately. Deployment of those stacks is not part of this demo.
+
+## Cross-project identity and API quota
+
+The workflow identity is hosted in `ritru-tf-seed-01`, while application resources
+belong to `ritru-fc-dev-01`. The backend Google provider explicitly sets
+`billing_project` to the dev project and enables `user_project_override` so API
+quota/service enablement is evaluated there. Its identities need
+`serviceusage.services.use` in dev. Otherwise Cloud SQL/Pub/Sub can report that
+an API is disabled in the identity project even when it is enabled in dev.

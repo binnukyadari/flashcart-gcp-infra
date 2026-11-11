@@ -8,8 +8,10 @@ terraform {
   }
 }
 provider "google" {
-  project = "ritru-fc-dev-01"
-  region  = "asia-south1"
+  project               = "ritru-fc-dev-01"
+  region                = "asia-south1"
+  billing_project       = "ritru-fc-dev-01"
+  user_project_override = true
   default_labels = {
     project     = "flashcart"
     environment = "dev"
