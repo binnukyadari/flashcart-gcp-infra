@@ -22,3 +22,5 @@ scripts/backend.env
 gha-creds-*.json
 tfplan
 !stacks/03-application/.terraform.lock.hcl
+
+plan.log

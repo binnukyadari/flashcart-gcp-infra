@@ -125,7 +125,7 @@ jobs:
         working-directory: stacks/03-application
         run: |
           set +e
-          terraform plan -var-file=env/dev.tfvars -out=tfplan -lock=false -detailed-exitcode
+          terraform plan -no-color -var-file=env/dev.tfvars -out=tfplan -lock=false -detailed-exitcode > plan.log
           code=$?
           set -e
           if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
@@ -173,5 +173,5 @@ jobs:
       - name: Remove local plan files
         if: always()
         run: |
-          rm -f "$STACK/tfplan" "$STACK/plan.txt" "$STACK/plan.json" "$STACK/backend_override.tf.json"
+          rm -f "$STACK/tfplan" "$STACK/plan.txt" "$STACK/plan.json" "$STACK/plan.log" "$STACK/backend_override.tf.json"
           rm -f "$RUNNER_TEMP/flashcart-dev.tfstate" "$RUNNER_TEMP/flashcart-dev.tfstate.backup"
