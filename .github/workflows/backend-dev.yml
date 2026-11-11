@@ -1,0 +1,159 @@
+name: FlashCart connected dev demo
+on:
+  pull_request:
+    branches: [main]
+    paths: ['stacks/04-backend/**', 'scripts/backend-dev.py', '.github/workflows/backend-dev.yml', 'tests/test_backend_plan.py']
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Create the connected dev demo after plan review and approval'
+        type: boolean
+        default: false
+      confirmation:
+        description: 'Enter ritru-fc-dev-01/flashcart-backend to request deployment'
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: flashcart-backend-dev
+  cancel-in-progress: false
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  STACK: stacks/04-backend
+  TF_VAR_api_key: ${{ secrets.TF_BACKEND_API_KEY }}
+  TF_VAR_bootstrap_password: ${{ secrets.TF_BACKEND_BOOTSTRAP_PASSWORD }}
+jobs:
+  plan:
+    if: >-
+      github.repository == 'binnukyadari/flashcart-gcp-infra' &&
+      ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'feat/dev-training-stack') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan_digest: ${{ steps.review.outputs.plan_digest }}
+      creates: ${{ steps.review.outputs.creates }}
+      planned_at: ${{ steps.review.outputs.planned_at }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check training plan inputs
+        run: |
+          test -n "$TF_VAR_api_key"
+          test -n "$TF_VAR_bootstrap_password"
+          python3 -m unittest discover -s tests -p test_backend_plan.py -v
+      - id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_BACKEND_PLAN_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+          project_id: ritru-fc-dev-01
+          token_format: access_token
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.16.6'
+          terraform_wrapper: false
+      - name: Prepare private state snapshot
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: python3 scripts/backend-dev.py snapshot
+      - name: Initialize and validate
+        working-directory: stacks/04-backend
+        run: |
+          terraform init -lockfile=readonly
+          terraform fmt -check -recursive .
+          terraform validate
+      - name: Plan dev backend
+        working-directory: stacks/04-backend
+        run: |
+          set +e
+          terraform plan -no-color -var-file=env/dev.tfvars -lock=false -out=tfplan -detailed-exitcode > plan.log
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+          terraform show -json tfplan > plan.json
+      - name: Policy and scope checks
+        id: review
+        working-directory: stacks/04-backend
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/check-plan-policy.sh"
+          python3 "$GITHUB_WORKSPACE/scripts/backend-dev.py" check-plan plan.json
+      - name: Remove private temporary files
+        if: always()
+        run: |
+          rm -f "$STACK/tfplan" "$STACK/plan.json" "$STACK/plan.log" "$STACK/backend_override.tf.json"
+          rm -f "$RUNNER_TEMP/flashcart-backend-dev.tfstate"
+  apply:
+    name: Approved connected dev demo creation
+    needs: plan
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      inputs.deploy && inputs.confirmation == 'ritru-fc-dev-01/flashcart-backend' &&
+      vars.FLASHCART_BACKEND_APPLY_ENABLED == 'true' &&
+      needs.plan.outputs.plan_digest != '' && needs.plan.outputs.creates != '0'
+    environment: dev-backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+      REVIEWED_PLAN_AT: ${{ needs.plan.outputs.planned_at }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify reviewed source and approval age
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$EXPECTED_PLAN_DIGEST"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          python3 scripts/backend-dev.py check-age
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_BACKEND_APPLY_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_BACKEND_APPLY_SA }}
+          project_id: ritru-fc-dev-01
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.16.6'
+          terraform_wrapper: false
+      - name: Initialize the exact dev backend
+        working-directory: stacks/04-backend
+        run: |
+          terraform init -lockfile=readonly -backend-config=bucket=ritru-tfstate-586582398977 -backend-config=prefix=gcp-02-flashcart/stacks/04-backend/dev
+          terraform validate
+      - name: Replan and match the reviewed changes
+        working-directory: stacks/04-backend
+        run: |
+          set +e
+          terraform plan -no-color -var-file=env/dev.tfvars -lock-timeout=5m -out=tfplan -detailed-exitcode > plan.log
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+          terraform show -json tfplan > plan.json
+          bash "$GITHUB_WORKSPACE/scripts/check-plan-policy.sh"
+          python3 "$GITHUB_WORKSPACE/scripts/backend-dev.py" check-plan plan.json
+      - name: Apply the checked saved plan
+        working-directory: stacks/04-backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/backend-dev.py" check-age
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          terraform apply -no-color -lock-timeout=5m tfplan > apply.log
+      - name: Bootstrap dev inventory schema and demo catalog
+        run: gcloud run jobs execute flashcart-bootstrap-dev --project=ritru-fc-dev-01 --region=asia-south1 --wait --quiet
+      - name: Remove private temporary files
+        if: always()
+        run: rm -f "$STACK/tfplan" "$STACK/plan.json" "$STACK/plan.log" "$STACK/apply.log"
