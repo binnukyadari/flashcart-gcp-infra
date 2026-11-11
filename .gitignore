@@ -29,3 +29,4 @@ apply.log
 
 dev-outputs.json
 __pycache__/
+!stacks/04-backend/.terraform.lock.hcl

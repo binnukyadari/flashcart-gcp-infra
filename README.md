@@ -1,85 +1,84 @@
-# FlashCart GCP Infra (`gcp/02-flashcart-serverless-saga`)
+# FlashCart dev infrastructure
 
-Enterprise multi-environment Terraform repository for the **FlashCart Serverless E-Commerce & Saga Engine** on Google Cloud.
+A reusable GCP training project. Follow one complete order from a private API
+through PostgreSQL inventory, Firestore orders, Pub/Sub events and a private
+stored order summary. Start with [the practical training guide](docs/TRAINING.md).
 
-## Current Status
-- **Completed & Modularized:**
-  - `modules/vpc-network` + `stacks/01-network` (14 GCP APIs, custom regional VPC, Direct VPC Egress subnet, PSA `/20` peering, Cloud Router + NAT, IAP-only SSH firewall)
-  - `modules/data-tier` + `stacks/02-data` (Firestore Native with PITR, Pub/Sub Avro schema + topic + DLQ, Cloud SQL PostgreSQL 16 private-IP with IAM Auth, hardened GCS invoices bucket)
-  - Shared `.github/workflows/` (`infra.yml`, `terraform-stack.yml`, `drift.yml`), OPA Conftest `policies/*.rego`, `.tflint.hcl`, `.pre-commit-config.yaml`, `scripts/tf.sh`, `scripts/nuke-check.sh`
-- **Remaining Stacks to Build Next:**
-  - `stacks/03-app` (Artifact Registry, per-service SAs, Cloud SQL IAM DB users, Cloud Run `checkout-api`, `catalog-read-svc`, `inventory-svc`, Cloud Workflows `order-saga`, Eventarc trigger)
-  - `stacks/04-edge` (Serverless NEGs, Cloud Armor WAF + rate limiting, Cloud CDN on catalog, Global External ALB + optional Google-managed TLS)
-  - `stacks/05-extras` (Cloud Deploy canary pipeline + Monitoring alerts, Zero-ETL BigQuery Pub/Sub subscription, Cloud Run Jobs `outbox-relay` + `fulfillment-job`, Cloud Scheduler, OTel Secret, optional AlloyDB)
+## Current delivery
 
-## Fork qualification: dev-only planning and deployment preparation
+- Existing foundation: `flashcart-dev` VPC/subnet, private Cloud SQL PostgreSQL
+  inventory instance/database, Firestore default database, Pub/Sub and invoices bucket.
+- Artifact Registry `flashcart-docker`: created and verified by approved
+  [run 42996975357](https://github.com/binnukyadari/flashcart-gcp-infra/actions/runs/42996975357).
+- Backend: [binnukyadari/flashcart-backend](https://github.com/binnukyadari/flashcart-backend).
+  [Image run 43002866676](https://github.com/binnukyadari/flashcart-backend/actions/runs/43002866676)
+  passed 38 tests and published a tested linux/amd64 image. The backend stack pins
+  that image digest; image publication alone does not deploy the API.
+- `stacks/04-backend`: connected dev demo prepared for plan review/deployment.
+  A green plan is not proof of a deployed or working API; verify the live round trip.
+- Load balancer, WAF, analytics, scheduler and canary deployment are later lessons.
+  No staging/prod changes are part of this training delivery.
 
-This fork currently qualifies **only** `stacks/03-application` with
-`env/dev.tfvars` in `ritru-fc-dev-01`. The expected plan creates one immutable-tag
-Docker repository, `flashcart-docker`, in `asia-south1`. Network and data stacks
-are intentionally excluded from this PR's planning.
+## Read the stacks in order
 
-```text
-same-repository feat/flashcart-artifact-registry PR -> main
-  -> fixed dev Artifact Registry stack
-  -> keyless, read-only plan identity
-  -> format / validate / lint / plan / OPA / resource scope checks
-  -> allowlisted review summary; no apply job
-```
-
-There is no push trigger. Drift scanning is paused. PRs remain read-only.
-A separate manual deployment workflow is prepared for main with a required
-environment review, a default-off apply switch, and no configured apply identity.
-Staging/prod paths and saved plan uploads are absent. Plans use an ephemeral local backend with a read-only snapshot of the exact dev
-application state object (HTTP 404 means a new stack; other errors stop planning).
-GCS backend initialization itself writes a lock and initial state for new stacks,
-so read-only CI never initializes that remote backend. Only a future authorized
-apply job may initialize it after environment approval. Local snapshots run with `-lock=false`
-and are removed after the job. Counts and allowlisted resource details appear in the Actions
-job summary; raw plans, state, and OIDC credential files are not published.
-A deployment must produce and review a fresh plan after separate authorization;
-this PR's read-only snapshot must not be reused for apply.
-
-### Connected settings
-
-| Repository variable | Value |
+| Path | Responsibility |
 | --- | --- |
-| `GCP_WIF_PROVIDER` | `projects/586582398977/locations/global/workloadIdentityPools/flashcart-dev-pr/providers/github-pr` |
-| `GCP_PLAN_SA` | `flashcart-dev-pr-plan@ritru-tf-seed-01.iam.gserviceaccount.com` |
-| `GCP_STATE_BUCKET` | `ritru-tfstate-586582398977` |
-| `TF_STATE_PREFIX` | `gcp-02-flashcart` |
+| `stacks/01-network`, `modules/vpc-network` | Existing VPC, Cloud Run subnet, private service access, NAT and IAP firewall |
+| `stacks/02-data`, `modules/data-tier` | Existing SQL, Firestore, legacy Pub/Sub and invoice bucket |
+| `stacks/03-application`, `modules/application-tier` | Immutable-tag Docker repository |
+| `stacks/04-backend` | Private API, bootstrap/worker jobs, runtime identities, secrets and compatible events |
 
-`GCP_APPLY_SA`, `GCP_DEV_APPLY_SA` and `GCP_DEV_APPLY_WIF_PROVIDER` are deliberately
-not configured. `FLASHCART_DEV_APPLY_ENABLED=false`. These variables are identifiers,
-not credentials; no service-account key is needed.
+The backend stack preserves the earlier stacks and the legacy event topic/schema.
+It creates a separate event topic matching the backend's actual event envelope.
 
-The separate WIF pool/provider checks numeric repository ID `1453724177`, owner
-ID `334222478`, repository name, PR event, `main` base, the exact feature branch,
-and the `infra.yml` PR merge ref. Other branches, pushes, scheduled runs, and the
-upstream repository do not meet this provider's trust condition. A separate
-read-only provider permits only the manual workflow and reusable plan on main. The workflow
-also rejects forks before requesting cloud authentication.
+## GitHub workflows
 
-The plan account has `roles/artifactregistry.reader` in the dev project. Its
-conditional `roles/storage.objectViewer` bucket grant allows object reads only
-under `gcp-02-flashcart/stacks/03-application/dev/`. The IAM condition excludes bucket-level object listing and all other state
-prefixes. CI reads the exact object directly; it does not discover workspaces. There are no state write or lock permissions. Existing upstream identities
-and trust were left unchanged.
+| File | Purpose |
+| --- | --- |
+| `infra.yml` | Original registry PR checks plus local safety tests |
+| `terraform-stack.yml` | Reusable read-only registry plan |
+| `deploy-dev.yml` | Original main-only, approval-gated registry creation |
+| `backend-dev.yml` | Read-only backend PR plan, then approved main-only deployment |
+| `drift.yml` | Paused; manual placeholder only |
 
-The default branch still contains the old workflows until this PR is merged.
-The newly configured WIF provider rejects their push/manual/scheduled events,
-and this fork has no apply identity configured. Do not merge or authorize an
-apply until the actual PR plan and its checks have been reviewed. The prepared
-manual apply workflow requires separate merge/deployment authorization and
-scoped apply identity provisioning. See [the dev deployment guide](docs/DEV-DEPLOYMENT.md)
-for the gate configuration, plan comparison, exact remaining blockers and evidence limits.
+There are no push-triggered deployments. Both apply switches default off and
+manual inputs default to plan-only. Deployment requires the exact confirmation,
+a reviewed source/plan and required GitHub environment approval. Expired plans,
+changed main or changed plan fingerprints stop the run. Raw plans/state are not
+uploaded. Read-only plans use local snapshots because initializing a new GCS
+backend writes state/lock objects. Apply uses the real remote backend and locking.
 
-### Local validation without cloud access
+## State and credentials
+
+- Dev project: `ritru-fc-dev-01`; region: `asia-south1`.
+- State bucket: `ritru-tfstate-586582398977`; prefix: `gcp-02-flashcart`.
+- Separate state paths for every stack/environment; the backend uses
+  `gcp-02-flashcart/stacks/04-backend/dev`.
+- WIF provides temporary credentials. No service-account JSON keys are needed.
+- The read-only plan account reads only the permitted dev state objects and has
+  no deployment writes. Runtime identities have separate app permissions.
+- `TF_BACKEND_API_KEY` and `TF_BACKEND_BOOTSTRAP_PASSWORD` are protected GitHub
+  secrets. Terraform stores their deployed values in Secret Manager. Private
+  Terraform state/saved plans also contain sensitive values; never commit,
+  publish or paste them into chat or screenshots.
+- GitHub now uses immutable OIDC subjects containing numeric account/repository
+  IDs. Trust conditions must use the actual configured subject, including the
+  environment name for approval-gated jobs.
+
+The original registry history and gate details are in
+[DEV-DEPLOYMENT.md](docs/DEV-DEPLOYMENT.md). That document records the earlier
+preparation boundary; use actual Actions/settings for current gate status.
+
+## Validate locally without cloud access
 
 ```bash
-terraform fmt -check -recursive modules/application-tier stacks/03-application
-terraform -chdir=stacks/03-application init -backend=false
-terraform -chdir=stacks/03-application validate
+terraform fmt -check -recursive stacks/04-backend
+terraform -chdir=stacks/04-backend init -backend=false
+terraform -chdir=stacks/04-backend validate
+python3 -m unittest discover -s tests -v
 ```
 
-Do not use the legacy local helper's apply/destroy commands during qualification.
+Use disposable local databases/emulators for backend tests. Never run their
+TRUNCATE-based integration fixtures against shared or GCP data. The live demo
+bootstrap is different: it creates missing schema, grants runtime table access
+and inserts the demo product without resetting existing stock or orders.
